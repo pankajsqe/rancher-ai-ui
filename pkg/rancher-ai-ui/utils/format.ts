@@ -31,8 +31,82 @@ const md = new MarkdownIt({
   typographer: true,
 });
 
+const FENCED_CODE_BLOCK_RE = /```[\s\S]*?```/g;
+const YAML_KEY_RE = /^\s*[A-Za-z_][\w.-]*\s*:\s*.*$/;
+const YAML_LIST_RE = /^\s*-\s+.+$/;
+const YAML_DOC_MARKER_RE = /^\s*(---|\.\.\.)\s*$/;
+const YAML_K8S_KEY_RE = /^\s*(apiVersion|kind|metadata|spec|stringData|data|labels|annotations|containers|env|image|name|namespace)\s*:/;
+
+function looksLikeYamlParagraph(paragraph: string): boolean {
+  const lines = paragraph
+    .split('\n')
+    .map((line) => line.replace(/\r$/, ''))
+    .filter((line) => line.trim().length > 0);
+
+  if (lines.length < 2) {
+    return false;
+  }
+
+  const keyLines = lines.filter((line) => YAML_KEY_RE.test(line));
+  const listLines = lines.filter((line) => YAML_LIST_RE.test(line));
+  const hasK8sKey = lines.some((line) => YAML_K8S_KEY_RE.test(line));
+  const hasDocMarker = lines.some((line) => YAML_DOC_MARKER_RE.test(line));
+  const hasIndentedStructure = lines.some((line) => /^\s{2,}[A-Za-z_][\w.-]*\s*:/.test(line) || /^\s{2,}-\s+/.test(line));
+
+  if (hasK8sKey && keyLines.length >= 2) {
+    return true;
+  }
+
+  if (hasDocMarker && keyLines.length >= 1) {
+    return true;
+  }
+
+  return keyLines.length >= 3 && (hasIndentedStructure || listLines.length >= 1);
+}
+
+function normalizeYamlInTextSegment(segment: string): string {
+  const parts = segment.split(/(\n\s*\n)/);
+
+  return parts.map((part, index) => {
+    if (index % 2 === 1) {
+      return part;
+    }
+
+    const trimmed = part.trim();
+
+    if (!trimmed || !looksLikeYamlParagraph(trimmed)) {
+      return part;
+    }
+
+    const trailingNewline = part.endsWith('\n') ? '\n' : '';
+
+    return `\`\`\`yaml\n${ trimmed }\n\`\`\`${ trailingNewline }`;
+  }).join('');
+}
+
+function normalizeYamlMarkdown(message: string): string {
+  if (!message) {
+    return message;
+  }
+
+  const chunks: string[] = [];
+  let lastIndex = 0;
+
+  for (const match of message.matchAll(FENCED_CODE_BLOCK_RE)) {
+    const matchIndex = match.index ?? 0;
+
+    chunks.push(normalizeYamlInTextSegment(message.slice(lastIndex, matchIndex)));
+    chunks.push(match[0]);
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  chunks.push(normalizeYamlInTextSegment(message.slice(lastIndex)));
+
+  return chunks.join('');
+}
+
 export function formatMessageContent(message: string) {
-  const raw = md.render(message ?? '');
+  const raw = md.render(normalizeYamlMarkdown(message ?? ''));
 
   // remove trailing <br> tags and trailing whitespace/newlines
   return raw.replace(/(?:(?:<br\s*\/?>)|\r?\n|\s)+$/gi, '');
